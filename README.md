@@ -1,143 +1,153 @@
 NSGs, Network Watcher & VNet Peering
 
-This lab provides hands-on experience with Network Security Groups (NSGs), ICMP behavior, Network Watcher troubleshooting, and VNet peering constraints.
+This lab provides essential hands-on experience with Network Security Groups (**NSGs**) logic, **ICMP** behavior, the **Network Watcher** troubleshooting tool, and the fundamental constraints of **VNet Peering**.
 
-🎯 Goal of This Lab
+## 🎯 Lab Goals
 
-✔ Build and test NSG evaluation logic
-✔ Understand TCP vs ICMP behavior
-✔ Use Network Watcher's “Connection troubleshoot” tool
-✔ Validate overlapping vs non-overlapping VNet peering
-✔ Understand subnet-to-subnet traffic flows inside a VNet
+  * Build and test **NSG evaluation logic** (priority and specificity).
+  * Understand the difference between **TCP/UDP** filtering and **ICMP** behavior.
+  * Use **Network Watcher's "Connection Troubleshoot"** tool for diagnostics.
+  * Validate the requirement for **non-overlapping address spaces** in VNet peering.
+  * Understand basic subnet-to-subnet traffic flows within a VNet.
 
-🛠️ Lab Environment
-Virtual Network
-Resource	Address Space
-vnet-nsg-lab	10.0.0.0/16
-subnet-a	10.0.1.0/24
-subnet-b	10.0.2.0/24
-Virtual Machines
-VM	Subnet	Notes
-vm-a	subnet-a	Source for tests
-vm-b	subnet-b	Enable ICMP Echo in Windows Firewall
+-----
 
-ICMP is disabled by default on Windows - this is WHY ping doesn’t work until you turn it on.
+## 🛠️ Environment Setup
 
+We will start with a single Virtual Network segmented into two subnets to test NSG rules and intra-VNet communication.
 
-🔐 NSG Configuration: nsg-b
+### Virtual Network
 
-Associate nsg-b to subnet-b.
+| Resource | Address Space |
+| :--- | :--- |
+| **VNet** | `vnet-nsg-lab` (`10.0.0.0/16`) |
+| **Subnet A** | `subnet-a` (`10.0.1.0/24`) |
+| **Subnet B** | `subnet-b` (`10.0.2.0/24`) |
 
-Inbound Rules
-Priority	Source	Destination	Protocol	Action
-300	10.0.1.0/24	10.0.2.0/24	TCP	Allow
-310	Any	10.0.2.0/24	TCP	Deny
-🔎 Interpretation
+### Virtual Machines
 
-Traffic from subnet-a → subnet-b (TCP) is allowed because rule 300 is a more specific Allow.
+| VM Name | Subnet | Notes |
+| :--- | :--- | :--- |
+| **vm-a** | `subnet-a` | Source for connectivity tests (Default OS behavior) |
+| **vm-b** | `subnet-b` | Destination for connectivity tests **(Must enable ICMP Echo in Windows Firewall)** |
 
-All other TCP traffic → subnet-b is denied by rule 310.
+> **Critical Note:** Windows Server OS disables **ICMP Echo** (Ping) by default in the host firewall. Ping will fail until you specifically enable the **"File and Printer Sharing (Echo Request - ICMPv4-In)"** rule on `vm-b`.
 
-ICMP is NOT affected by these rules because NSGs only inspect TCP/UDP unless protocol is set to “Any”.
+-----
 
-🔍 Connectivity Tests
-From vm-a:
-✔ Ping vm-b
+## 🔐 NSG Configuration and Evaluation
+
+We will create an NSG (`nsg-b`) and associate it with **subnet-b** to control inbound traffic to `vm-b`.
+
+### NSG Rules: `nsg-b` (Inbound)
+
+| Priority | Source | Destination | Protocol | Port | Action | Purpose |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **300** | `10.0.1.0/24` (Subnet A) | `10.0.2.0/24` (Subnet B) | **TCP** | `*` | **Allow** | Allow specific subnet-to-subnet TCP traffic. |
+| **310** | `Any` | `10.0.2.0/24` (Subnet B) | **TCP** | `*` | **Deny** | Deny all other TCP traffic to Subnet B. |
+
+### 🔎 Interpretation
+
+  * Traffic is evaluated by **Priority** (lowest number is highest priority).
+  * Traffic from **Subnet A** (`10.0.1.0/24`) to **Subnet B** (`10.0.2.0/24`) is **Allowed** by Rule 300.
+  * All other **TCP** traffic is caught and **Denied** by the broader Rule 310.
+  * **Crucially:** These rules only specify **TCP**. **ICMP** (Ping) traffic is **NOT** affected by either rule, and will bypass them to be handled by the default rules (which generally allow intra-VNet traffic).
+
+-----
+
+## 🔍 Connectivity Tests
+
+Perform the following tests from `vm-a` (in `subnet-a`) to `vm-b` (in `subnet-b`).
+
+### Test 1: ICMP (Ping)
+
+```powershell
 ping <vm-b-private-ip>
+```
 
+| Expected Result | Reason |
+| :--- | :--- |
+| **✔️ Works** | ICMP is not filtered by the TCP rules (300, 310). Since `vm-b`'s Windows Firewall was configured to allow Echo, the traffic flows based on the **Default NSG rule** allowing VNet-to-VNet communication. |
 
-Result: Works, because ICMP is not filtered by TCP rules.
+### Test 2: TCP (e.g., Port 443)
 
-✔ Test TCP port
+This simulates an attempt to connect to a service on a TCP port.
+
+```powershell
 Test-NetConnection <vm-b-private-ip> -Port 443
+```
 
+| Expected Result | Reason |
+| :--- | :--- |
+| **Likely Fails/Warns** | **Rule 300** allows the TCP connection at the NSG level. However, if no application is actively listening on **port 443** on `vm-b`, the connection will still fail. |
 
-Result: Likely fails, because:
+> **Demonstration:** This shows the difference between **Network Reachability** (NSG allows it) and **Application Availability** (Is a service running to answer the request?).
 
-No listener → no response
+-----
 
-Or NSG denies it unless an app is listening on 443
+## 🛰️ Network Watcher Diagnostics
 
-This demonstrates the difference between network reachability and application availability.
+Use the **Connection Troubleshoot** tool in Azure Network Watcher to validate the NSG and routing configuration without relying on an application listener.
 
-🛰️ Network Watcher - Connection Troubleshoot
+1.  Enable **Network Watcher** for the region containing your VNet.
+2.  Go to **Network Watcher → Connection Troubleshoot**.
 
-Enable Network Watcher if required:
+### Test 1: TCP (Port 443)
 
-Azure Portal → Network Watcher → “Enable”
+| Setting | Value |
+| :--- | :--- |
+| **Source** | `vm-a` |
+| **Destination** | `vm-b`: **Port 443** |
+| **Expected Result** | **Succeeds (Green)** at the **NSG** level due to Rule 300. |
 
-Test 1: TCP (443)
+### Test 2: ICMP
 
-Source: vm-a
-Destination: vm-b:443
-Expected: Fail or Warn depending on listener + NSG
+| Setting | Value |
+| :--- | :--- |
+| **Source** | `vm-a` |
+| **Destination** | `vm-b`: **ICMP** |
+| **Expected Result** | **Succeeds (Green)** at the **NSG** level because the traffic bypasses the TCP rules. |
 
-Test 2: ICMP
+> **Demonstrates:** Network Watcher confirms the NSG rules are correct. If the actual `ping` test fails, you know the issue lies with the **Windows Firewall** on the VM, not the Azure NSG.
 
-Source: vm-a
-Destination: vm-b
-Expected: Success
+-----
 
-Demonstrates:
+## 🌐 VNet Peering Scenarios
 
-TCP is evaluated by NSG rules
+VNet Peering is the mechanism used to extend your private Azure network across VNets. It has one strict requirement.
 
-ICMP requires Windows Firewall to allow it
+### ❌ Scenario A: Overlapping Address Spaces (Peering Fails)
 
-NSGs do not filter ICMP unless explicitly set to “Any”
+| VNet | Address Space |
+| :--- | :--- |
+| `vnet-overlap1` | `10.1.0.0/16` |
+| `vnet-overlap2` | `10.1.0.0/17` |
 
-🌐 VNet Peering Scenarios
-❌ Overlapping Address Spaces - Peering Fails
-VNet	Address Space
-vnet-overlap1	10.1.0.0/16
-vnet-overlap2	10.1.0.0/17
+  * **Action:** Attempt to create peering.
+  * **Result:** Azure will **refuse to peer** these networks.
+  * **Reason:** Overlapping ranges lead to **routing ambiguity**; the system wouldn't know which VNet a packet destined for `10.1.1.0` should go to.
 
-Azure will refuse to peer these networks.
+### ✔️ Scenario B: Non-Overlapping VNets (Peering Succeeds)
 
-Reason: Overlaps → routing ambiguity.
+| VNet | Address Space |
+| :--- | :--- |
+| `vnet-ok1` | `10.12.0.0/16` |
+| `vnet-ok2` | `172.16.0.0/17` |
 
-✔ Non-Overlapping VNets - Peering Succeeds
-VNet	Address Space
-vnet-ok1	10.12.0.0/16
-vnet-ok2	172.16.0.0/17
+  * **Action:** Create peering from `ok1` → `ok2` AND `ok2` → `ok1`.
+  * **Result:** The peering status becomes **Connected**.
+  * **Outcome:** Traffic flows seamlessly between the VNets using **private IP addresses**, extending the private network boundary.
 
-Create peering both ways:
+-----
 
-ok1 → ok2
+## 🧠 Key Takeaways
 
-ok2 → ok1
+| Topic | Key Principles |
+| :--- | :--- |
+| **NSG Rules** | **Priority** (Lower number = higher priority) is evaluated first. **Evaluation stops at the first match** (either Allow or Deny). |
+| **Protocol Filtering** | A rule set to **TCP** will **not** filter **ICMP**. To block ICMP, the protocol must be set to **ICMP** or **Any**. |
+| **Windows Firewall** | This is the final layer of defense **inside the VM**. It must be configured to allow protocols like **ICMP Echo** for internal ping tests to succeed. |
+| **Network Watcher** | The **"Connection Troubleshoot"** tool provides a clear, objective analysis of whether **NSG rules** or **routing** are the cause of a failure. |
+| **VNet Peering** | **Requires non-overlapping address ranges** to prevent routing conflicts. Peering successfully extends the private network. |
 
-Traffic flows seamlessly via private IPs.
-
-🧠 Key Takeaways
-🔹 NSG Rules
-
-Evaluated by priority (lower number = higher priority)
-
-Evaluation stops at first match
-
-TCP rules do not affect ICMP
-
-🔹 Windows Firewall
-
-Must enable ICMP Echo for ping to work
-
-🔹 Network Watcher
-
-“Connection troubleshoot” simulates actual packet flows
-
-Helps confirm:
-
-NSG behavior
-
-Routing
-
-Firewall issues
-
-🔹 VNet Peering
-
-Requires non-overlapping ranges
-
-Overlaps → automatic failure
-
-Peering = private network extension
+-----
